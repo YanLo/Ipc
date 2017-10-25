@@ -21,20 +21,31 @@ enum general_const
 
 enum sem_index
 {
-    mut_ex,
-    full,
-    empty
+    MUT_EX,
+    FULL,
+    EMPTY
+};
+
+enum sem_indicating_proccess_alive_index
+{
+    SERVER_IND = 0,
+    CLIENT_IND = 1,
+    SERVER_VAL = 0xaa,
+    CLIENT_VAL = 0xff
 };
 
 void setKeyAndReadFromSharedMem(pid_t pid);
 void getKeyAndWriteInSHaredMem(const char* name_of_data_file);
 
-void P(int end_of_sending, int semid, int semnum);
+void P(int semid, int semnum);
 void V(int semid, int semnum);
-int produceItem(int data_file_fd, char* buf);
+void produceItem(int data_file_fd, char* buf);
 void putItem(const char* buf, char* shmem);
 void getItem(char* buf, const char* shmem); 
 void consumeItem(const char* buf);
+
+void initializeLiveSems(int semid, int senum);
+void checkOtherProccessAlive(int semid, int semnum);
 
 
 int main(int argc, char* argv[])
@@ -71,14 +82,18 @@ void setKeyAndReadFromSharedMem(pid_t pid)
     int shmid = shmget(key, BUF_SIZE, IPC_CREAT | 0666);
     char* shmem = (char*) shmat(shmid, NULL, 0);
 
+    int sem_alive_id = semget(key + 1, 2, IPC_CREAT | 0666);
+    initializeLiveSems(sem_alive_id, CLIENT_IND);
+
     char buf[BUF_SIZE];
     while(1)
     {
-        P(0, semid, full);
-        P(0, semid, mut_ex);
+        checkOtherProccessAlive(sem_alive_id, SERVER_IND);
+        P(semid, FULL);
+        P(semid, MUT_EX);
         getItem(buf, shmem);
-        V(semid, mut_ex);
-        V(semid, empty);
+        V(semid, MUT_EX);
+        V(semid, EMPTY);
         consumeItem(buf);
     }
 }
@@ -98,9 +113,13 @@ void getKeyAndWriteInSHaredMem(const char* name_of_data_file)
     int pid = atoi(pid_str);
     key_t key = ftok("shmem", pid);
     int semid = semget(key, SEM_QT, IPC_CREAT | 0666);
-    semctl(semid, mut_ex, SETVAL, 1);
-    semctl(semid, full, SETVAL, 0);
-    semctl(semid, empty, SETVAL, 1);
+    semctl(semid, MUT_EX, SETVAL, 1);
+    semctl(semid, FULL, SETVAL, 0);
+    semctl(semid, EMPTY, SETVAL, 1);
+
+    int sem_alive_id = semget(key + 1, 2, IPC_CREAT | 0666);
+    initializeLiveSems(sem_alive_id, SERVER_IND);
+
     int shmid = shmget(key, BUF_SIZE, IPC_CREAT | 0666);
     char* shmem = (char*) shmat(shmid, NULL, 0);
  
@@ -109,26 +128,24 @@ void getKeyAndWriteInSHaredMem(const char* name_of_data_file)
         ERROR_OPENING(name_of_data_file)
     
     char buf[BUF_SIZE];
-    int end_of_sending = 0;
     while(1)
     {
-        end_of_sending = produceItem(data_file_fd, buf);
-        P(end_of_sending, semid, empty);
-        P(end_of_sending, semid, mut_ex);
+        checkOtherProccessAlive(sem_alive_id, CLIENT_IND);
+        produceItem(data_file_fd, buf);
+        P(semid, EMPTY);
+        P(semid, MUT_EX);
         putItem(buf, shmem);
-        V(semid, mut_ex);
-        V(semid, full);
+        V(semid, MUT_EX);
+        V(semid, FULL);
     }
 }
     
-int produceItem(int data_file_fd, char* buf)
+void produceItem(int data_file_fd, char* buf)
 {
     bzero(buf, BUF_SIZE);
     ssize_t read_bytes = read(data_file_fd, buf, BUF_SIZE);
     if(read_bytes == 0)
-        return 1;
-
-    return 0;
+        exit(EXIT_SUCCESS);
 }
 
 void putItem(const char* buf, char* shmem)
@@ -146,22 +163,14 @@ void consumeItem(const char* buf)
     write(STDOUT_FILENO, buf, BUF_SIZE);
 }
 
-void P(int end_of_sending, int semid, int semnum)
+void P(int semid, int semnum)
 {
     struct sembuf sembuf;
     sembuf.sem_num = semnum;
     sembuf.sem_op  = -1;
     sembuf.sem_flg = SEM_UNDO;
 
-    int ret_val = semop(semid, &sembuf, 1);
-    if(ret_val == -1)
-        exit(EXIT_SUCCESS);
-
-    if(end_of_sending == 1)
-    {
-        semctl(semid, 0, IPC_RMID);
-        exit(EXIT_SUCCESS);
-    }
+    semop(semid, &sembuf, 1);
 }
 
 void V(int semid, int semnum)
@@ -173,3 +182,39 @@ void V(int semid, int semnum)
 
     semop(semid, &sembuf, 1);
 }
+
+void initializeLiveSems(int semid, int semnum)
+{
+    semctl(semid, SERVER_IND, SETVAL, 0);
+    semctl(semid, CLIENT_IND, SETVAL, 0);
+
+    struct sembuf sembuf;
+    sembuf.sem_num = semnum;
+    switch (semnum)
+    {
+        case SERVER_IND:
+            sembuf.sem_op = SERVER_IND;
+        case CLIENT_IND:
+            sembuf.sem_op = CLIENT_VAL;
+        default:
+            sembuf.sem_op = 0;
+    }
+    sembuf.sem_flg = SEM_UNDO;
+
+    semop(semid, &sembuf, 1);
+}
+
+void checkOtherProccessAlive(int semid, int semnum)
+{
+    int semval = semctl(semid, semnum, GETVAL);
+    switch(semnum)
+    {
+        case SERVER_IND:
+            if(semval != SERVER_VAL)
+                exit(EXIT_SUCCESS);
+        case CLIENT_IND:
+            if(semval != SERVER_VAL)
+                exit(EXIT_SUCCESS);
+    }
+}
+
