@@ -12,6 +12,9 @@
 
 #include "defines.h"
 
+#define INC_VAL  1
+#define DEC_VAL -1
+
 enum general_const
 {
     BUF_SIZE    = 16384,
@@ -26,12 +29,12 @@ enum sem_index
     EMPTY
 };
 
-enum sem_indicating_proccess_alive_index
+enum sem_indicating_proccess_alive
 {
-    SERVER_IND = 0,
-    CLIENT_IND = 1,
-    SERVER_VAL = 0xaa,
-    CLIENT_VAL = 0xff
+    WRITER_SEM_IND = 0,
+    READER_SEM_IND = 1,
+    WRITER_SEM_VAL = 0xa,
+    READER_SEM_VAL = 0xf
 };
 
 void setKeyAndReadFromSharedMem(pid_t pid);
@@ -44,8 +47,10 @@ void putItem(const char* buf, char* shmem);
 void getItem(char* buf, const char* shmem); 
 void consumeItem(const char* buf);
 
-void initializeLiveSems(int semid, int senum);
-void checkOtherProccessAlive(int semid, int semnum);
+void setReaderLiveSem(int semid, int semnum);
+void setWriterLiveSem(int semid, int semnum);
+void checkWRITERalive(int semid);
+void checkREADERalive(int semid);
 
 
 int main(int argc, char* argv[])
@@ -64,6 +69,7 @@ int main(int argc, char* argv[])
     return 0;
 }
 
+/*READER*/
 void setKeyAndReadFromSharedMem(pid_t pid)
 {
     int ret_mkfifo = mkfifo("fifo_key", 0666);
@@ -83,12 +89,13 @@ void setKeyAndReadFromSharedMem(pid_t pid)
     char* shmem = (char*) shmat(shmid, NULL, 0);
 
     int sem_alive_id = semget(key + 1, 2, IPC_CREAT | 0666);
-    initializeLiveSems(sem_alive_id, CLIENT_IND);
+    setReaderLiveSem(sem_alive_id, READER_SEM_IND);
 
+ //   exit(1);
     char buf[BUF_SIZE];
     while(1)
     {
-        checkOtherProccessAlive(sem_alive_id, SERVER_IND);
+        checkWRITERalive(sem_alive_id);
         P(semid, FULL);
         P(semid, MUT_EX);
         getItem(buf, shmem);
@@ -98,6 +105,7 @@ void setKeyAndReadFromSharedMem(pid_t pid)
     }
 }
 
+/*WRITER*/
 void getKeyAndWriteInSHaredMem(const char* name_of_data_file)
 {
     int ret_mkfifo = mkfifo("fifo_key", 0666);
@@ -118,7 +126,7 @@ void getKeyAndWriteInSHaredMem(const char* name_of_data_file)
     semctl(semid, EMPTY, SETVAL, 1);
 
     int sem_alive_id = semget(key + 1, 2, IPC_CREAT | 0666);
-    initializeLiveSems(sem_alive_id, SERVER_IND);
+    setWriterLiveSem(sem_alive_id, WRITER_SEM_IND);
 
     int shmid = shmget(key, BUF_SIZE, IPC_CREAT | 0666);
     char* shmem = (char*) shmat(shmid, NULL, 0);
@@ -126,11 +134,13 @@ void getKeyAndWriteInSHaredMem(const char* name_of_data_file)
     int data_file_fd = open(name_of_data_file, O_RDONLY);
     if(data_file_fd < 0)
         ERROR_OPENING(name_of_data_file)
-    
+ 
+
+ //   exit(1);
     char buf[BUF_SIZE];
     while(1)
     {
-        checkOtherProccessAlive(sem_alive_id, CLIENT_IND);
+        checkREADERalive(sem_alive_id);
         produceItem(data_file_fd, buf);
         P(semid, EMPTY);
         P(semid, MUT_EX);
@@ -163,58 +173,28 @@ void consumeItem(const char* buf)
     write(STDOUT_FILENO, buf, BUF_SIZE);
 }
 
-void P(int semid, int semnum)
-{
-    struct sembuf sembuf;
-    sembuf.sem_num = semnum;
-    sembuf.sem_op  = -1;
-    sembuf.sem_flg = SEM_UNDO;
-
-    semop(semid, &sembuf, 1);
+#define SEM_FUNC(funcname, val_to_add)          \
+void funcname(int semid, int semnum)            \
+{                                               \
+    struct sembuf sembuf;                       \
+    sembuf.sem_num = semnum;                    \
+    sembuf.sem_op  = val_to_add;                \
+    sembuf.sem_flg = SEM_UNDO;                  \
+    semop(semid, &sembuf, 1);                   \
 }
 
-void V(int semid, int semnum)
-{
-    struct sembuf sembuf;
-    sembuf.sem_num = semnum;
-    sembuf.sem_op  = 1;
-    sembuf.sem_flg = SEM_UNDO;
+SEM_FUNC(P, DEC_VAL)
+SEM_FUNC(V, INC_VAL)
+SEM_FUNC(setReaderLiveSem, READER_SEM_VAL)
+SEM_FUNC(setWriterLiveSem, WRITER_SEM_VAL)
 
-    semop(semid, &sembuf, 1);
+#define CHECK_PROCCESS_ALIVE(proccess)                          \
+void check##proccess##alive(int semid)                          \
+{                                                               \
+    int semval = semctl(semid, proccess##_SEM_IND, GETVAL);     \
+    if(semval != proccess##_SEM_VAL)                            \
+        exit(EXIT_SUCCESS);                                     \
 }
 
-void initializeLiveSems(int semid, int semnum)
-{
-    semctl(semid, SERVER_IND, SETVAL, 0);
-    semctl(semid, CLIENT_IND, SETVAL, 0);
-
-    struct sembuf sembuf;
-    sembuf.sem_num = semnum;
-    switch (semnum)
-    {
-        case SERVER_IND:
-            sembuf.sem_op = SERVER_IND;
-        case CLIENT_IND:
-            sembuf.sem_op = CLIENT_VAL;
-        default:
-            sembuf.sem_op = 0;
-    }
-    sembuf.sem_flg = SEM_UNDO;
-
-    semop(semid, &sembuf, 1);
-}
-
-void checkOtherProccessAlive(int semid, int semnum)
-{
-    int semval = semctl(semid, semnum, GETVAL);
-    switch(semnum)
-    {
-        case SERVER_IND:
-            if(semval != SERVER_VAL)
-                exit(EXIT_SUCCESS);
-        case CLIENT_IND:
-            if(semval != SERVER_VAL)
-                exit(EXIT_SUCCESS);
-    }
-}
-
+CHECK_PROCCESS_ALIVE(READER)
+CHECK_PROCCESS_ALIVE(WRITER)
