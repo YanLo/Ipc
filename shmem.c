@@ -12,13 +12,9 @@
 
 #include "defines.h"
 
-#define INC_VAL  1
-#define DEC_VAL -1
-
 enum general_const
 {
     BUF_SIZE    = 16384,
-    SEM_QT      = 3,
     PID_MAX_LEN = 10
 };
 
@@ -26,32 +22,23 @@ enum sem_index
 {
     MUT_EX,
     FULL,
-    EMPTY
+    EMPTY,
+    WRITER_SEM_IND,
+    READER_SEM_IND,
+    SEM_QT
 };
 
-enum sem_indicating_proccess_alive
-{
-    WRITER_SEM_IND = 0,
-    READER_SEM_IND = 1,
-    WRITER_SEM_VAL = 0xa,
-    READER_SEM_VAL = 0xf
-};
+void    setKeyAndReadFromSharedMem(pid_t pid);
+void    getKeyAndWriteInSHaredMem(const char* name_of_data_file);
 
-void setKeyAndReadFromSharedMem(pid_t pid);
-void getKeyAndWriteInSHaredMem(const char* name_of_data_file);
-
-void P(int semid, int semnum);
-void V(int semid, int semnum);
-void produceItem(int data_file_fd, char* buf);
-void putItem(const char* buf, char* shmem);
-void getItem(char* buf, const char* shmem); 
-void consumeItem(const char* buf);
-
-void setReaderLiveSem(int semid, int semnum);
-void setWriterLiveSem(int semid, int semnum);
-void checkWRITERalive(int semid);
-void checkREADERalive(int semid);
-
+void    P(int semid, int semnum,
+                int semnum_of_another_pr, ssize_t read_bytes);
+void    V(int semid, int semnum);
+void    setLiveSem(int semid, int semnum);
+ssize_t produceItem(int data_file_fd, char* buf);
+void    putItem(const char* buf, char* shmem);
+void    getItem(char* buf, const char* shmem, int semid); 
+void    consumeItem(const char* buf);
 
 int main(int argc, char* argv[])
 {
@@ -85,20 +72,17 @@ void setKeyAndReadFromSharedMem(pid_t pid)
 
     key_t key = ftok("shmem", pid);
     int semid = semget(key, SEM_QT, IPC_CREAT | 0666);
+    setLiveSem(semid, READER_SEM_IND);
     int shmid = shmget(key, BUF_SIZE, IPC_CREAT | 0666);
     char* shmem = (char*) shmat(shmid, NULL, 0);
-
-    int sem_alive_id = semget(key + 1, 2, IPC_CREAT | 0666);
-    setReaderLiveSem(sem_alive_id, READER_SEM_IND);
+    char buf[BUF_SIZE];
 
  //   exit(1);
-    char buf[BUF_SIZE];
     while(1)
     {
-        checkWRITERalive(sem_alive_id);
-        P(semid, FULL);
-        P(semid, MUT_EX);
-        getItem(buf, shmem);
+        P(semid, FULL, WRITER_SEM_IND, BUF_SIZE);
+        P(semid, MUT_EX, WRITER_SEM_IND, BUF_SIZE);
+        getItem(buf, shmem, semid);
         V(semid, MUT_EX);
         V(semid, EMPTY);
         consumeItem(buf);
@@ -121,41 +105,41 @@ void getKeyAndWriteInSHaredMem(const char* name_of_data_file)
     int pid = atoi(pid_str);
     key_t key = ftok("shmem", pid);
     int semid = semget(key, SEM_QT, IPC_CREAT | 0666);
+    setLiveSem(semid, WRITER_SEM_IND);
     semctl(semid, MUT_EX, SETVAL, 1);
     semctl(semid, FULL, SETVAL, 0);
     semctl(semid, EMPTY, SETVAL, 1);
 
-    int sem_alive_id = semget(key + 1, 2, IPC_CREAT | 0666);
-    setWriterLiveSem(sem_alive_id, WRITER_SEM_IND);
-
     int shmid = shmget(key, BUF_SIZE, IPC_CREAT | 0666);
     char* shmem = (char*) shmat(shmid, NULL, 0);
- 
     int data_file_fd = open(name_of_data_file, O_RDONLY);
     if(data_file_fd < 0)
         ERROR_OPENING(name_of_data_file)
- 
-
- //   exit(1);
     char buf[BUF_SIZE];
+    
+ //   exit(1);
+    size_t read_bytes = 0;
     while(1)
     {
-        checkREADERalive(sem_alive_id);
-        produceItem(data_file_fd, buf);
-        P(semid, EMPTY);
-        P(semid, MUT_EX);
+        read_bytes = produceItem(data_file_fd, buf);
+        P(semid, EMPTY, READER_SEM_IND, read_bytes);
+        P(semid, MUT_EX, READER_SEM_IND, read_bytes);
         putItem(buf, shmem);
         V(semid, MUT_EX);
         V(semid, FULL);
     }
 }
     
-void produceItem(int data_file_fd, char* buf)
+ssize_t produceItem(int data_file_fd, char* buf)
 {
     bzero(buf, BUF_SIZE);
     ssize_t read_bytes = read(data_file_fd, buf, BUF_SIZE);
-    if(read_bytes == 0)
-        exit(EXIT_SUCCESS);
+    if(read_bytes < 0)
+    {
+        perror("read_from_data_file");
+        exit(EXIT_FAILURE);
+    }
+    return read_bytes;
 }
 
 void putItem(const char* buf, char* shmem)
@@ -163,7 +147,7 @@ void putItem(const char* buf, char* shmem)
     memcpy(shmem, buf, BUF_SIZE);
 }
 
-void getItem(char* buf, const char* shmem)
+void getItem(char* buf, const char* shmem, int semid)
 {
     memcpy(buf, shmem, BUF_SIZE);
 }
@@ -173,28 +157,48 @@ void consumeItem(const char* buf)
     write(STDOUT_FILENO, buf, BUF_SIZE);
 }
 
-#define SEM_FUNC(funcname, val_to_add)          \
-void funcname(int semid, int semnum)            \
-{                                               \
-    struct sembuf sembuf;                       \
-    sembuf.sem_num = semnum;                    \
-    sembuf.sem_op  = val_to_add;                \
-    sembuf.sem_flg = SEM_UNDO;                  \
-    semop(semid, &sembuf, 1);                   \
+void P(int semid, int semnum,
+                int semnum_of_another_pr, ssize_t read_bytes)
+{
+    struct sembuf sops[3];
+    sops[0].sem_num = semnum_of_another_pr;
+    sops[0].sem_op  = -1;
+    sops[0].sem_flg = IPC_NOWAIT;
+
+    sops[1].sem_num = semnum;
+    sops[1].sem_op  = -1;
+    sops[1].sem_flg = 0;
+
+    sops[2].sem_num = semnum_of_another_pr;
+    sops[2].sem_op  = 1;
+    sops[2].sem_flg = 0;
+
+    int ret = semop(semid, sops, 3);
+    if(ret == -1)
+    {
+        semctl(semid, 0, IPC_RMID);
+        exit(EXIT_FAILURE);
+    }
+    if(read_bytes == 0)
+        exit(EXIT_SUCCESS);
 }
 
-SEM_FUNC(P, DEC_VAL)
-SEM_FUNC(V, INC_VAL)
-SEM_FUNC(setReaderLiveSem, READER_SEM_VAL)
-SEM_FUNC(setWriterLiveSem, WRITER_SEM_VAL)
+void V(int semid, int semnum)
+{
+    struct sembuf sop;
+    sop.sem_num = semnum;
+    sop.sem_op  = 1;
+    sop.sem_flg = 0;
 
-#define CHECK_PROCCESS_ALIVE(proccess)                          \
-void check##proccess##alive(int semid)                          \
-{                                                               \
-    int semval = semctl(semid, proccess##_SEM_IND, GETVAL);     \
-    if(semval != proccess##_SEM_VAL)                            \
-        exit(EXIT_SUCCESS);                                     \
+    semop(semid, &sop, 1);
 }
 
-CHECK_PROCCESS_ALIVE(READER)
-CHECK_PROCCESS_ALIVE(WRITER)
+void setLiveSem(int semid, int semnum)
+{
+    struct sembuf sop;
+    sop.sem_num = semnum;
+    sop.sem_op  = 1;
+    sop.sem_flg = SEM_UNDO;
+
+    semop(semid, &sop, 1);
+}
