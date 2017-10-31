@@ -31,10 +31,11 @@ enum sem_index
 void    setKeyAndReadFromSharedMem(pid_t pid);
 void    getKeyAndWriteInSHaredMem(const char* name_of_data_file);
 
-void    P(int semid, int semnum,
-                int semnum_of_another_pr, ssize_t read_bytes);
+void    P(int semid, int semnum, int semnum_of_another_pr);
+void    P_EMPTY(int semid, ssize_t read_bytes, int it_num);
+void    P_FULL(int semid, int it_num);
 void    V(int semid, int semnum);
-void    setLiveSem(int semid, int semnum);
+void    setLiveSem(int semid);
 ssize_t produceItem(int data_file_fd, char* buf);
 void    putItem(const char* buf, char* shmem);
 void    getItem(char* buf, const char* shmem, int semid); 
@@ -72,20 +73,22 @@ void setKeyAndReadFromSharedMem(pid_t pid)
 
     key_t key = ftok("shmem", pid);
     int semid = semget(key, SEM_QT, IPC_CREAT | 0666);
-    setLiveSem(semid, READER_SEM_IND);
+    setLiveSem(semid);
     int shmid = shmget(key, BUF_SIZE, IPC_CREAT | 0666);
     char* shmem = (char*) shmat(shmid, NULL, 0);
     char buf[BUF_SIZE];
 
  //   exit(1);
+    int it_num = 0;
     while(1)
     {
-        P(semid, FULL, WRITER_SEM_IND, BUF_SIZE);
-        P(semid, MUT_EX, WRITER_SEM_IND, BUF_SIZE);
+        P_FULL(semid, it_num);
+        P(semid, MUT_EX, WRITER_SEM_IND);
         getItem(buf, shmem, semid);
         V(semid, MUT_EX);
         V(semid, EMPTY);
         consumeItem(buf);
+        it_num++;
     }
 }
 
@@ -105,7 +108,7 @@ void getKeyAndWriteInSHaredMem(const char* name_of_data_file)
     int pid = atoi(pid_str);
     key_t key = ftok("shmem", pid);
     int semid = semget(key, SEM_QT, IPC_CREAT | 0666);
-    setLiveSem(semid, WRITER_SEM_IND);
+    setLiveSem(semid);
     semctl(semid, MUT_EX, SETVAL, 1);
     semctl(semid, FULL, SETVAL, 0);
     semctl(semid, EMPTY, SETVAL, 1);
@@ -118,15 +121,17 @@ void getKeyAndWriteInSHaredMem(const char* name_of_data_file)
     char buf[BUF_SIZE];
     
  //   exit(1);
-    size_t read_bytes = 0;
+    ssize_t read_bytes = 0;
+    int it_num = 0;
     while(1)
     {
         read_bytes = produceItem(data_file_fd, buf);
-        P(semid, EMPTY, READER_SEM_IND, read_bytes);
-        P(semid, MUT_EX, READER_SEM_IND, read_bytes);
+        P_EMPTY(semid, read_bytes, it_num);
+        P(semid, MUT_EX, READER_SEM_IND);
         putItem(buf, shmem);
         V(semid, MUT_EX);
         V(semid, FULL);
+        it_num++;
     }
 }
     
@@ -157,8 +162,7 @@ void consumeItem(const char* buf)
     write(STDOUT_FILENO, buf, BUF_SIZE);
 }
 
-void P(int semid, int semnum,
-                int semnum_of_another_pr, ssize_t read_bytes)
+void P(int semid, int semnum, int semnum_of_another_pr)
 {
     struct sembuf sops[3];
     sops[0].sem_num = semnum_of_another_pr;
@@ -173,14 +177,72 @@ void P(int semid, int semnum,
     sops[2].sem_op  = 1;
     sops[2].sem_flg = 0;
 
-    int ret = semop(semid, sops, 3);
-    if(ret == -1)
+    int ret_semop = semop(semid, sops, 3);
+    if(ret_semop == -1)
+    {
+        semctl(semid, 0, IPC_RMID);
+        exit(EXIT_FAILURE);
+    }
+}
+
+void P_EMPTY(int semid, ssize_t read_bytes, int it_num)
+{
+    int ret_semop = -1;
+    struct sembuf sops[3];
+    sops[0].sem_num = READER_SEM_IND;
+    sops[0].sem_op  = -1;
+    sops[0].sem_flg = IPC_NOWAIT;
+
+    sops[1].sem_num = EMPTY;
+    sops[1].sem_op  = -1;
+    sops[1].sem_flg = 0;
+
+    if(it_num != 1)
+    {
+        sops[2].sem_num = READER_SEM_IND;
+        sops[2].sem_op  = 1;
+        sops[2].sem_flg = 0;
+        ret_semop = semop(semid, sops, 3);
+    }
+    else
+        ret_semop = semop(semid, sops, 2);
+
+    if(ret_semop == -1)
     {
         semctl(semid, 0, IPC_RMID);
         exit(EXIT_FAILURE);
     }
     if(read_bytes == 0)
         exit(EXIT_SUCCESS);
+}
+
+void P_FULL(int semid, int it_num)
+{
+    int ret_semop = -1;
+    struct sembuf sops[3];
+    sops[0].sem_num = WRITER_SEM_IND;
+    sops[0].sem_op  = -1;
+    sops[0].sem_flg = IPC_NOWAIT;
+
+    sops[1].sem_num = FULL;
+    sops[1].sem_op  = -1;
+    sops[1].sem_flg = 0;
+
+    if(it_num != 0)
+    {
+        sops[2].sem_num = WRITER_SEM_IND;
+        sops[2].sem_op  = 1;
+        sops[2].sem_flg = 0;
+        ret_semop = semop(semid, sops, 3);
+    }
+    else
+        ret_semop = semop(semid, sops, 2);
+
+    if(ret_semop == -1)
+    {
+        semctl(semid, 0, IPC_RMID);
+        exit(EXIT_SUCCESS);
+    }
 }
 
 void V(int semid, int semnum)
@@ -193,12 +255,16 @@ void V(int semid, int semnum)
     semop(semid, &sop, 1);
 }
 
-void setLiveSem(int semid, int semnum)
+void setLiveSem(int semid)
 {
-    struct sembuf sop;
-    sop.sem_num = semnum;
-    sop.sem_op  = 1;
-    sop.sem_flg = SEM_UNDO;
+    struct sembuf sops[2];
+    sops[0].sem_num = READER_SEM_IND;
+    sops[0].sem_op  = 1;
+    sops[0].sem_flg = SEM_UNDO;
 
-    semop(semid, &sop, 1);
+    sops[1].sem_num = WRITER_SEM_IND;
+    sops[1].sem_op  = 1;
+    sops[1].sem_flg = SEM_UNDO;
+
+    semop(semid, sops, 2);
 }
