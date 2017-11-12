@@ -12,9 +12,14 @@
 
 #include "defines.h"
 
+#define SEMBUF_OP(ind, semnum, semop, semflg)             \
+sops[ind].sem_num = semnum;                               \
+sops[ind].sem_op  = semop;                                \
+sops[ind].sem_flg = semflg;                               \
+
 enum general_const
 {
-    BUF_SIZE    = 16384,
+    BUF_SIZE    = 65536, 
     PROJECT_ID  = 1341
 };
 
@@ -42,9 +47,9 @@ void    P_FULL(int semid);
 void    P(int semid, int semnum, int live_semnum_of_another_pr);
 void    V(int semid, int semnum, int live_semnum_of_another_pr);
 ssize_t produceItem(int data_file_fd, char* buf);
-void    putItem(const char* buf, char* shmem);
-void    getItem(char* buf, const char* shmem, int semid); 
-void    consumeItem(const char* buf);
+void    putItem(const char* buf, char* shmem, ssize_t read_bytes);
+int     getItem(char* buf, const char* shmem, int semid); 
+void    consumeItem(const char* buf, int read_bytes);
 
 int main(int argc, char* argv[])
 {
@@ -54,7 +59,8 @@ int main(int argc, char* argv[])
     int semid = semget(key, SEM_QT, IPC_CREAT | 0666);
     if((semid == -1) && (errno != EEXIST))
         ERROR_CREATING("sems_set");
-    int shmid = shmget(key, BUF_SIZE, IPC_CREAT | 0666);
+    int shmid = shmget(key, BUF_SIZE + 4, IPC_CREAT | 0666);
+    /*4 bytes for store how many bytes read*/
     if((shmid == -1) && (errno != EEXIST))
         ERROR_CREATING("shmem");
     char* shmem = (char*) shmat(shmid, NULL, 0);
@@ -71,15 +77,16 @@ void reader(int semid, char* shmem)
 {
     startReaderActivity(semid);
     char buf[BUF_SIZE];
+    int read_bytes = 0;
 
     while(1)
     {
         P_FULL(semid);
         P(semid, MUT_EX, WRITER_SEM_IND);
-        getItem(buf, shmem, semid);
+        read_bytes = getItem(buf, shmem, semid);
         V(semid, MUT_EX, WRITER_SEM_IND);
         V(semid, EMPTY,  WRITER_SEM_IND);
-        consumeItem(buf);
+        consumeItem(buf, read_bytes);
     }
 }
 
@@ -99,7 +106,7 @@ void writer(int semid, char* shmem, const char* name_of_file)
         read_bytes = produceItem(data_file_fd, buf);
         P_EMPTY(semid, read_bytes, it_num);
         P(semid, MUT_EX, READER_SEM_IND);
-        putItem(buf, shmem);
+        putItem(buf, shmem, read_bytes);
         V(semid, MUT_EX, READER_SEM_IND);
         V(semid, FULL,   READER_SEM_IND);
         it_num++;
@@ -109,21 +116,10 @@ void writer(int semid, char* shmem, const char* name_of_file)
 void startReaderActivity(int semid)
 {
     struct sembuf sops[4];
-    sops[0].sem_num = MUT_USE_SEM;
-    sops[0].sem_op  = -1;
-    sops[0].sem_flg = SEM_UNDO;
-
-    sops[1].sem_num = MUT_USE_SEM;
-    sops[1].sem_num = 0;
-    sops[1].sem_flg = 0;
-
-    sops[2].sem_num = MUT_USE_SEM;
-    sops[2].sem_op  = 2;
-    sops[2].sem_flg = SEM_UNDO;
-
-    sops[3].sem_num = READER_SEM_IND;
-    sops[3].sem_op  = 1;
-    sops[3].sem_flg = SEM_UNDO;
+    SEMBUF_OP(0, MUT_USE_SEM, -1, SEM_UNDO)
+    SEMBUF_OP(1, MUT_USE_SEM, 0, 0)
+    SEMBUF_OP(2, MUT_USE_SEM, 2, SEM_UNDO)
+    SEMBUF_OP(3, READER_SEM_IND, 1, SEM_UNDO)
 
     int ret_val = semop(semid, sops, 4);
 }
@@ -131,21 +127,10 @@ void startReaderActivity(int semid)
 void startWriterActivity(int semid)
 {
     struct sembuf sops[4] = {};
-    sops[0].sem_num = MUT_USE_SEM;
-    sops[0].sem_op  = 0;
-    sops[0].sem_flg = 0;
-
-    sops[1].sem_num = MUT_USE_SEM;
-    sops[1].sem_op  = 1;
-    sops[1].sem_flg = SEM_UNDO;
-
-    sops[2].sem_num = WRITER_SEM_IND;
-    sops[2].sem_op  = 1;
-    sops[2].sem_flg = SEM_UNDO;
-
-    sops[3].sem_num = READER_SEM_IND;
-    sops[3].sem_op  = 1;
-    sops[3].sem_flg = SEM_UNDO;
+    SEMBUF_OP(0, MUT_USE_SEM, 0, 0)
+    SEMBUF_OP(1, MUT_USE_SEM, 1, SEM_UNDO)
+    SEMBUF_OP(2, WRITER_SEM_IND, 1, SEM_UNDO)
+    SEMBUF_OP(3, READER_SEM_IND, 1, SEM_UNDO)
 
     int ret_semop = semop(semid, sops, 4);
     if(ret_semop < 0)
@@ -173,46 +158,24 @@ void P_FULL(int semid)
 {
     int ret_semop = -1;
     struct sembuf sops[5];
-    sops[0].sem_num = WRITER_SEM_IND;
-    sops[0].sem_op  = -1;
-    sops[0].sem_flg = IPC_NOWAIT;
-
-    sops[1].sem_num = FULL;
-    sops[1].sem_op  = -1;
-    sops[1].sem_flg = 0;
-
-    sops[2].sem_num = WRITER_SEM_IND;
-    sops[2].sem_op  = 1;
-    sops[2].sem_flg = 0;
-
-    sops[3].sem_num = WR_SET_MUT_SEM;
-    sops[3].sem_op  = -1;
-    sops[3].sem_flg  = 0;
-
-    sops[4].sem_num = WR_SET_MUT_SEM;
-    sops[4].sem_op  = 1;
-    sops[4].sem_flg = 0;
+    SEMBUF_OP(0, WRITER_SEM_IND, -1, IPC_NOWAIT)
+    SEMBUF_OP(1, FULL, -1, 0)
+    SEMBUF_OP(2, WRITER_SEM_IND, 1, 0)
+    SEMBUF_OP(3, WR_SET_MUT_SEM, -1, 0)
+    SEMBUF_OP(4, WR_SET_MUT_SEM, 1, 0)
     ret_semop = semop(semid, sops, 5);
 
     if(ret_semop < 0)
-        exit(EXIT_SUCCESS);    
+        exit(EXIT_FAILURE);    
 }
 
 void P_EMPTY(int semid, ssize_t read_bytes, int it_num)
 {
     int ret_semop = -1;
     struct sembuf sops[3];
-    sops[0].sem_num = READER_SEM_IND;
-    sops[0].sem_op  = -1;
-    sops[0].sem_flg = IPC_NOWAIT;
-
-    sops[1].sem_num = EMPTY;
-    sops[1].sem_op  = -1;
-    sops[1].sem_flg = 0;
-
-    sops[2].sem_num = READER_SEM_IND;
-    sops[2].sem_op  = 1;
-    sops[2].sem_flg = 0;
+    SEMBUF_OP(0, READER_SEM_IND, -1, IPC_NOWAIT)
+    SEMBUF_OP(1, EMPTY, -1, 0)
+    SEMBUF_OP(2, READER_SEM_IND, 1, 0)
 
     if(it_num == 2)
         ret_semop = semop(semid, sops, 2);
@@ -229,17 +192,9 @@ void P_EMPTY(int semid, ssize_t read_bytes, int it_num)
 void name(int semid, int semnum, int semnum_of_another_pr)  \
 {                                                           \
     struct sembuf sops[3];                                  \
-    sops[0].sem_num = semnum_of_another_pr;                 \
-    sops[0].sem_op  = -1;                                   \
-    sops[0].sem_flg = IPC_NOWAIT;                           \
-                                                            \
-    sops[1].sem_num = semnum;                               \
-    sops[1].sem_op  = op;                                   \
-    sops[1].sem_flg = 0;                                    \
-                                                            \
-    sops[2].sem_num = semnum_of_another_pr;                 \
-    sops[2].sem_op  = 1;                                    \
-    sops[2].sem_flg = 0;                                    \
+    SEMBUF_OP(0, semnum_of_another_pr, -1, IPC_NOWAIT)      \
+    SEMBUF_OP(1, semnum, op, 0)                             \
+    SEMBUF_OP(2, semnum_of_another_pr, 1, 0)                \
                                                             \
     int ret_semop = semop(semid, sops, 3);                  \
     if(ret_semop < 0)                                       \
@@ -251,7 +206,7 @@ P_V_FUNCIONS(V, +1)
 
 ssize_t produceItem(int data_file_fd, char* buf)
 {
-    bzero(buf, BUF_SIZE);
+  //  bzero(buf, BUF_SIZE);
     ssize_t read_bytes = read(data_file_fd, buf, BUF_SIZE);
     if(read_bytes < 0)
     {
@@ -261,18 +216,23 @@ ssize_t produceItem(int data_file_fd, char* buf)
     return read_bytes;
 }
 
-void putItem(const char* buf, char* shmem)
+void putItem(const char* buf, char* shmem, ssize_t read_bytes)
 {
-    memcpy(shmem, buf, BUF_SIZE);
+    *(int*)shmem = read_bytes;
+    memcpy(shmem + sizeof(int), buf, BUF_SIZE);
 }
 
-void getItem(char* buf, const char* shmem, int semid)
+int getItem(char* buf, const char* shmem, int semid)
 {
-    memcpy(buf, shmem, BUF_SIZE);
+    int read_bytes = *(int*)shmem;
+    memcpy(buf, shmem + sizeof(int), read_bytes);
+    return read_bytes;
 }
 
-void consumeItem(const char* buf)
+void consumeItem(const char* buf, int read_bytes)
 {
-    write(STDOUT_FILENO, buf, BUF_SIZE);
+    write(STDOUT_FILENO, buf, read_bytes);
+    if(read_bytes < BUF_SIZE)
+        exit(EXIT_SUCCESS);
 }
 
