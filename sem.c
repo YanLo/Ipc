@@ -121,7 +121,9 @@ void startReaderActivity(int semid)
     SEMBUF_OP(2, MUT_USE_SEM, 2, SEM_UNDO)
     SEMBUF_OP(3, READER_SEM_IND, 1, SEM_UNDO)
 
-    int ret_val = semop(semid, sops, 4);
+    int ret_semop = semop(semid, sops, 4);
+    if(ret_semop < 0)
+        exit(EXIT_FAILURE);
 }
 
 void startWriterActivity(int semid)
@@ -156,15 +158,14 @@ void setMutualSems(int semid)
 
 void P_FULL(int semid)
 {
-    int ret_semop = -1;
     struct sembuf sops[5];
     SEMBUF_OP(0, WRITER_SEM_IND, -1, IPC_NOWAIT)
     SEMBUF_OP(1, FULL, -1, 0)
     SEMBUF_OP(2, WRITER_SEM_IND, 1, 0)
     SEMBUF_OP(3, WR_SET_MUT_SEM, -1, 0)
     SEMBUF_OP(4, WR_SET_MUT_SEM, 1, 0)
-    ret_semop = semop(semid, sops, 5);
 
+    int ret_semop = semop(semid, sops, 5);
     if(ret_semop < 0)
         exit(EXIT_FAILURE);    
 }
@@ -206,7 +207,6 @@ P_V_FUNCIONS(V, +1)
 
 ssize_t produceItem(int data_file_fd, char* buf)
 {
-  //  bzero(buf, BUF_SIZE);
     ssize_t read_bytes = read(data_file_fd, buf, BUF_SIZE);
     if(read_bytes < 0)
     {
@@ -218,7 +218,7 @@ ssize_t produceItem(int data_file_fd, char* buf)
 
 void putItem(const char* buf, char* shmem, ssize_t read_bytes)
 {
-    *(int*)shmem = read_bytes;
+    *(int*)shmem = (int) read_bytes;
     memcpy(shmem + sizeof(int), buf, BUF_SIZE);
 }
 
