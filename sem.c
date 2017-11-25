@@ -38,10 +38,6 @@ enum sem_index
 void    reader(int semid, char* shmem);
 void    writer(int semid, char* shmem, const char* name_of_file);
 
-void    startReaderActivity(int semid);
-void    startWriterActivity(int semid);
-void    setMutualSems(int semid);
-
 void    P_EMPTY(int semid, ssize_t read_bytes, int it_num);
 void    P_FULL(int semid);
 void    P(int semid, int semnum, int live_semnum_of_another_pr);
@@ -75,7 +71,16 @@ int main(int argc, char* argv[])
 
 void reader(int semid, char* shmem)
 {
-    startReaderActivity(semid);
+    struct sembuf sops[4];
+    SEMBUF_OP(0, MUT_USE_SEM, -1, SEM_UNDO)
+    SEMBUF_OP(1, MUT_USE_SEM, 0, 0)
+    SEMBUF_OP(2, MUT_USE_SEM, 2, SEM_UNDO)
+    SEMBUF_OP(3, READER_SEM_IND, 1, SEM_UNDO)
+
+    int ret_semop = semop(semid, sops, 4);
+    if(ret_semop < 0)
+        exit(EXIT_FAILURE);
+
     char buf[BUF_SIZE];
     int read_bytes = 0;
 
@@ -83,7 +88,7 @@ void reader(int semid, char* shmem)
     {
         P_FULL(semid);
         P(semid, MUT_EX, WRITER_SEM_IND);
-        read_bytes = getItem(buf, shmem, semid);
+        read_bytes = getItem(buf, shmem, semid);        
         V(semid, MUT_EX, WRITER_SEM_IND);
         V(semid, EMPTY,  WRITER_SEM_IND);
         consumeItem(buf, read_bytes);
@@ -92,8 +97,26 @@ void reader(int semid, char* shmem)
 
 void writer(int semid, char* shmem, const char* name_of_file)
 {
-    startWriterActivity(semid);
-    setMutualSems(semid);
+    struct sembuf sops[4] = {};
+    SEMBUF_OP(0, MUT_USE_SEM, 0, 0)
+    SEMBUF_OP(1, MUT_USE_SEM, 1, SEM_UNDO)
+    SEMBUF_OP(2, WRITER_SEM_IND, 1, SEM_UNDO)
+    SEMBUF_OP(3, READER_SEM_IND, 1, SEM_UNDO)
+    int ret_semop = semop(semid, sops, 4);
+    if(ret_semop < 0)
+        exit(EXIT_FAILURE);
+        
+    semctl(semid, MUT_EX, SETVAL, 1);
+    semctl(semid, FULL, SETVAL, 0);
+    semctl(semid, EMPTY, SETVAL, 1);
+
+    struct sembuf sop;
+    sop.sem_num = WR_SET_MUT_SEM;
+    sop.sem_op  = 1;
+    sop.sem_flg = SEM_UNDO;
+    ret_semop = semop(semid, &sop, 1);
+    if(ret_semop < 0)
+        exit(EXIT_FAILURE);
 
     int data_file_fd = open(name_of_file, O_RDONLY);
     if(data_file_fd < 0)
@@ -112,49 +135,6 @@ void writer(int semid, char* shmem, const char* name_of_file)
         it_num++;
     }
 }
- 
-void startReaderActivity(int semid)
-{
-    struct sembuf sops[4];
-    SEMBUF_OP(0, MUT_USE_SEM, -1, SEM_UNDO)
-    SEMBUF_OP(1, MUT_USE_SEM, 0, 0)
-    SEMBUF_OP(2, MUT_USE_SEM, 2, SEM_UNDO)
-    SEMBUF_OP(3, READER_SEM_IND, 1, SEM_UNDO)
-
-    int ret_semop = semop(semid, sops, 4);
-    if(ret_semop < 0)
-        exit(EXIT_FAILURE);
-}
-
-void startWriterActivity(int semid)
-{
-    struct sembuf sops[4] = {};
-    SEMBUF_OP(0, MUT_USE_SEM, 0, 0)
-    SEMBUF_OP(1, MUT_USE_SEM, 1, SEM_UNDO)
-    SEMBUF_OP(2, WRITER_SEM_IND, 1, SEM_UNDO)
-    SEMBUF_OP(3, READER_SEM_IND, 1, SEM_UNDO)
-
-    int ret_semop = semop(semid, sops, 4);
-    if(ret_semop < 0)
-        exit(EXIT_FAILURE);
-}
-
-void setMutualSems(int semid)
-{
-    semctl(semid, MUT_EX, SETVAL, 1);
-    semctl(semid, FULL, SETVAL, 0);
-    semctl(semid, EMPTY, SETVAL, 1);
-
-    struct sembuf sop;
-    sop.sem_num = WR_SET_MUT_SEM;
-    sop.sem_op  = 1;
-    sop.sem_flg = SEM_UNDO;
-
-    int ret_semop = semop(semid, &sop, 1);
-    if(ret_semop < 0)
-        exit(EXIT_FAILURE);
-}
-
 
 void P_FULL(int semid)
 {
@@ -162,7 +142,7 @@ void P_FULL(int semid)
     SEMBUF_OP(0, WRITER_SEM_IND, -1, IPC_NOWAIT)
     SEMBUF_OP(1, FULL, -1, 0)
     SEMBUF_OP(2, WRITER_SEM_IND, 1, 0)
-    SEMBUF_OP(3, WR_SET_MUT_SEM, -1, 0)
+    SEMBUF_OP(3, WR_ST_MUT_SEM, -1, 0)
     SEMBUF_OP(4, WR_SET_MUT_SEM, 1, 0)
 
     int ret_semop = semop(semid, sops, 5);
