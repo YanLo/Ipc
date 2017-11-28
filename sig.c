@@ -16,8 +16,6 @@ enum
     BUF_SIZE = 16384
 };
 
-sig_atomic_t mutex = 0;
-
 void cont(int signo)
 {
 }
