@@ -16,21 +16,20 @@ enum
     BUF_SIZE = 16384
 };
 
-int mutex = 1;
+sig_atomic_t mutex = 0;
 
-void setMutex(int signo)
+void cont(int signo)
 {
-    mutex = 1;
 }
 
-int success = 0;
+sig_atomic_t success = 0;
 
 void reashSuccess(int signo)
 {
     success = 1;
 }
 
-int bit_ext = 0;
+sig_atomic_t bit_ext = 0;
 
 void convertSignalToBit(int signo)
 {
@@ -40,10 +39,9 @@ void convertSignalToBit(int signo)
         bit_ext = 0;
 }
 
-
 void tellParent(pid_t parent_id);
 void tellChild(pid_t child_id);
-void waitParent(sigset_t* emptymask);
+void waitParent(sigset_t* emptymask, int* child_ready);
 void waitChild(sigset_t* waitmask);
 
 void sendFile(const char* name_of_file, int parent_id);
@@ -54,7 +52,7 @@ int main(int argc, char* argv[])
     CHECK_COM_LINE_ARG(argc)
 
     struct sigaction act;
-    act.sa_handler = &setMutex;
+    act.sa_handler = &cont;
     if(sigaction(SIGUSR1, &act, NULL) < 0)
         ERROR_SIGACTION
     if(sigaction(SIGUSR2, &act, NULL) < 0)
@@ -71,7 +69,6 @@ int main(int argc, char* argv[])
         ERROR_SIGACTION
 
     sigset_t mask;
-    sigemptyset(&mask);
     sigaddset(&mask, SIGUSR1);
     sigaddset(&mask, SIGUSR2);
     if(sigprocmask(SIG_BLOCK, &mask, NULL) < 0)
@@ -99,6 +96,7 @@ void sendFile(const char* name_of_file, pid_t parent_id)
     sigset_t emptymask;
     sigemptyset(&emptymask);
 
+    int child_ready = 0; 
     while(read_bytes > 0)
     {
         for(slider = 0; slider < read_bytes; slider++)
@@ -108,7 +106,7 @@ void sendFile(const char* name_of_file, pid_t parent_id)
             while(bit_mask <= 128)
             {
                 bit = byte & bit_mask;
-                waitParent(&emptymask);
+                waitParent(&emptymask, &child_ready);
                 if(bit)
                     kill(parent_id, SIGSEGV);
                 else
@@ -120,7 +118,7 @@ void sendFile(const char* name_of_file, pid_t parent_id)
         read_bytes = read(file_fd, buf, BUF_SIZE);
     }
 
-    waitParent(&emptymask);
+    waitParent(&emptymask, &child_ready);
     kill(parent_id, SIGCONT);
     tellParent(parent_id);
     close(file_fd);
@@ -136,7 +134,7 @@ void receiveFile(pid_t child_id)
     sigemptyset(&waitmask);
     sigaddset(&waitmask, SIGSEGV);
     sigaddset(&waitmask, SIGPIPE);
-
+   
     while(1)
     {
         bzero(buf, BUF_SIZE);
@@ -170,16 +168,17 @@ void tellChild(pid_t child_id)
     kill(child_id, SIGUSR1);
 }
 
-void waitParent(sigset_t* emptymask)
+void waitParent(sigset_t* emptymask, int* child_ready)
 {
-    while(mutex == 0)
+    if(*child_ready)
+    {
         sigsuspend(emptymask);
-    mutex = 0;
+    }
+    else
+        *child_ready = 1;
 }
 
 void waitChild(sigset_t* waitmask)
 {
-    while(mutex == 0)
         sigsuspend(waitmask);
-    mutex = 0;
 }
