@@ -20,6 +20,11 @@ void cont(int signo)
 {
 }
 
+void sigchldHandler(int signo)
+{
+    exit(EXIT_FAILURE);
+}
+
 sig_atomic_t success = 0;
 
 void reashSuccess(int signo)
@@ -64,6 +69,10 @@ int main(int argc, char* argv[])
 
     act.sa_handler = &reashSuccess;
     if(sigaction(SIGCONT, &act, NULL) < 0)
+        ERROR_SIGACTION
+
+    act.sa_handler = &sigchldHandler;
+    if(sigaction(SIGCHLD, &act, NULL) < 0)
         ERROR_SIGACTION
 
     sigset_t mask;
@@ -135,7 +144,7 @@ void receiveFile(pid_t child_id)
     sigset_t waitmask;
     sigfillset(&waitmask);
     sigdelset(&waitmask, SIGUSR2);
-    sigdelset(&waitmask, SIGALRM);
+    sigdelset(&waitmask, SIGCHLD);
    
     while(1)
     {
@@ -184,7 +193,5 @@ void waitParent(sigset_t* waitmask, int* child_ready)
 
 void waitChild(sigset_t* waitmask)
 {
-    alarm(1);
     sigsuspend(waitmask);
-    alarm(0);
 }
