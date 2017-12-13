@@ -18,7 +18,8 @@ enum
 { 
     CHLD_BUF_SIZE   = 1 << 17, //128kB
     PIPE_SIZE       = 1 << 12,
-    MAX_CHLD_QT     = 128
+    MAX_CHLD_QT     = 128,
+    MAX_BUF_SIZE    = 1 << 20
 };
 
 int chld_qt = 0;
@@ -37,6 +38,7 @@ struct node
     ssize_t remain_bytes;
     int     read_finished;
     int     write_finished;
+    int     new_data;
     int     pipefd_rd[2];
     int     pipefd_wr[2];
 };
@@ -44,12 +46,17 @@ struct node
 size_t getBufSize(int chld_num)
 {
     size_t buf_size = 512 * pow(3, chld_num);
-    return buf_size < (1 << 20) ? buf_size : 1 << 20;
+    if(buf_size <= MAX_BUF_SIZE)
+        return buf_size;
+    else
+        return MAX_BUF_SIZE;
 }
 
-void child(int fd_rd, int fd_wr, struct node* nodes);
+void child(int id, int fd_rd, int fd_wr, struct node* nodes);
 void parent(struct node* nodes);
 void useReadyFds(struct node* nodes);
+void readNode(struct node* nodes, int i);
+void writeNode(struct node* nodes, int i);
 
 int main(int argc, char* argv[])
 {
@@ -79,7 +86,7 @@ int main(int argc, char* argv[])
         {
             fd_rd = nodes[chld_num - 1].pipefd_wr[0];
             fd_wr = nodes[chld_num].pipefd_rd[1];
-            child(fd_rd, fd_wr, nodes);
+            child(chld_num, fd_rd, fd_wr, nodes);
             return 0;
         }
         if(pid > 0)
@@ -90,7 +97,6 @@ int main(int argc, char* argv[])
     return 0;
 }
 
-
 void parent(struct node* nodes)
 {
     int i = 0, flags;
@@ -98,16 +104,20 @@ void parent(struct node* nodes)
     {
         nodes[i].buf_size = getBufSize(chld_qt - i + 1);
         nodes[i].buf = (char*) calloc(nodes[i].buf_size, sizeof(char));
+        assert(nodes[i].buf);
         nodes[i].buf_write_from = nodes[i].buf;
         nodes[i].read_bytes     = 0;
         nodes[i].written_bytes  = 0;
         nodes[i].remain_bytes   = 0;
         nodes[i].read_finished  = 0;
         nodes[i].write_finished = 0;
+        nodes[i].new_data       = 0;
         close(nodes[i].pipefd_rd[1]);
         close(nodes[i].pipefd_wr[0]);
         flags = fcntl(nodes[i].pipefd_wr[1], F_GETFL);
         CHECK_RET_VAL(fcntl, fcntl(nodes[i].pipefd_wr[1], F_SETFL, flags | O_NONBLOCK))
+        flags = fcntl(nodes[i].pipefd_rd[0], F_GETFL);
+        CHECK_RET_VAL(fcntl, fcntl(nodes[i].pipefd_rd[0], F_SETFL, flags | O_NONBLOCK))
     }
     close(file_fd);
 
@@ -127,9 +137,9 @@ void parent(struct node* nodes)
         tv.tv_usec = 0;
         for(i = 1; i < chld_qt; i++)
         {
-            if(!nodes[i].read_finished)
+            if(nodes[i].read_finished != 1)
                 FD_SET(nodes[i].pipefd_rd[0], &readfds);
-            if(!nodes[i].write_finished)
+            if(nodes[i].write_finished != 1)
                 FD_SET(nodes[i].pipefd_wr[1], &writefds);
         }
         useReadyFds(nodes);
@@ -146,32 +156,20 @@ void useReadyFds(struct node* nodes)
     {
         for(i = 1; i < chld_qt; i++)
         {
-            if(FD_ISSET(nodes[i].pipefd_rd[0], &readfds) && (nodes[i].remain_bytes == 0))
+            if(FD_ISSET(nodes[i].pipefd_rd[0], &readfds) && (nodes[i].remain_bytes == 0) && (nodes[i].new_data == 0))
             {
                 nodes[i].read_bytes = read(nodes[i].pipefd_rd[0], nodes[i].buf, nodes[i].buf_size);
                 if(nodes[i].read_bytes == 0)
                 {
                     nodes[i].read_finished = 1;
                     close(nodes[i].pipefd_rd[0]);
-                }
-            }
-            if(FD_ISSET(nodes[i].pipefd_wr[1], &writefds) && (nodes[i].read_bytes > 0))
-            {
-                if(nodes[i].remain_bytes)
-                {
-                    nodes[i].written_bytes  = write(nodes[i].pipefd_wr[1], nodes[i].buf_write_from, nodes[i].remain_bytes);
-                    CHECK_RET_VAL(write, nodes[i].written_bytes)
-                    nodes[i].remain_bytes = nodes[i].remain_bytes - nodes[i].written_bytes;
-                    nodes[i].buf_write_from = nodes[i].buf_write_from + nodes[i].written_bytes;
+                    nodes[i].new_data = 0;
                 }
                 else
-                {
-                    nodes[i].written_bytes  = write(nodes[i].pipefd_wr[1], nodes[i].buf, nodes[i].read_bytes);
-                    CHECK_RET_VAL(write, nodes[i].written_bytes)
-                    nodes[i].remain_bytes   = nodes[i].read_bytes - nodes[i].written_bytes;
-                    nodes[i].buf_write_from = nodes[i].buf + nodes[i].written_bytes;
-                }
+                    nodes[i].new_data = 1;
             }
+            if(FD_ISSET(nodes[i].pipefd_wr[1], &writefds) && (nodes[i].new_data || nodes[i].remain_bytes))
+                writeNode(nodes, i);
             else 
                 if(FD_ISSET(nodes[i].pipefd_wr[1], &writefds) && nodes[i].read_finished)
                 {
@@ -189,7 +187,29 @@ void useReadyFds(struct node* nodes)
     }
 }
 
-void child(int fd_rd, int fd_wr, struct node* nodes)
+void writeNode(struct node* nodes, int i)
+{
+    if(nodes[i].remain_bytes == 0)
+    {
+        nodes[i].written_bytes  = write(nodes[i].pipefd_wr[1], nodes[i].buf, nodes[i].read_bytes);
+        CHECK_RET_VAL(write, nodes[i].written_bytes)
+        nodes[i].remain_bytes   = nodes[i].read_bytes - nodes[i].written_bytes;
+        nodes[i].buf_write_from = nodes[i].buf + nodes[i].written_bytes;
+        if(nodes[i].remain_bytes == 0)
+            nodes[i].new_data = 0;
+    }
+    else
+    {
+        nodes[i].written_bytes  = write(nodes[i].pipefd_wr[1], nodes[i].buf_write_from, nodes[i].remain_bytes);
+        CHECK_RET_VAL(write, nodes[i].written_bytes)
+        nodes[i].remain_bytes = nodes[i].remain_bytes - nodes[i].written_bytes;
+        nodes[i].buf_write_from = nodes[i].buf_write_from + nodes[i].written_bytes;
+        if(nodes[i].remain_bytes == 0)
+            nodes[i].new_data = 0;
+    }
+}
+
+void child(int chld_num, int fd_rd, int fd_wr, struct node* nodes)
 {
     int i = 0;
     for(i = 1; i < chld_qt; i++)
@@ -202,10 +222,12 @@ void child(int fd_rd, int fd_wr, struct node* nodes)
             close(nodes[i].pipefd_wr[0]);
     }
 
-    char buf[CHLD_BUF_SIZE] = {};
+    char  buf[CHLD_BUF_SIZE] = {};
     ssize_t read_bytes = read(fd_rd, buf, CHLD_BUF_SIZE);
     while(read_bytes > 0)
     {
+        if (chld_num == 2)
+            sleep(1);
         write(fd_wr, buf, read_bytes);
         read_bytes = read(fd_rd, buf, CHLD_BUF_SIZE);
     }
