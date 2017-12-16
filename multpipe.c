@@ -38,6 +38,8 @@ struct node
     ssize_t remain_bytes;
     int     read_finished;
     int     write_finished;
+    int     read_avail;
+    int     write_avail;
     int     new_data;
     int     pipefd_rd[2];
     int     pipefd_wr[2];
@@ -45,11 +47,8 @@ struct node
 
 size_t getBufSize(int chld_num)
 {
-    size_t buf_size = 512 * pow(3, chld_num);
-    if(buf_size <= MAX_BUF_SIZE)
-        return buf_size;
-    else
-        return MAX_BUF_SIZE;
+    size_t buf_size = 512 * pow(3, chld_num); 
+    return ((buf_size < MAX_BUF_SIZE) && buf_size) ? buf_size : MAX_BUF_SIZE;
 }
 
 void child(int id, int fd_rd, int fd_wr, struct node* nodes);
@@ -104,13 +103,14 @@ void parent(struct node* nodes)
     {
         nodes[i].buf_size = getBufSize(chld_qt - i + 1);
         nodes[i].buf = (char*) calloc(nodes[i].buf_size, sizeof(char));
-        assert(nodes[i].buf);
         nodes[i].buf_write_from = nodes[i].buf;
         nodes[i].read_bytes     = 0;
         nodes[i].written_bytes  = 0;
         nodes[i].remain_bytes   = 0;
         nodes[i].read_finished  = 0;
         nodes[i].write_finished = 0;
+        nodes[i].read_avail     = 0;
+        nodes[i].write_avail    = 0;
         nodes[i].new_data       = 0;
         close(nodes[i].pipefd_rd[1]);
         close(nodes[i].pipefd_wr[0]);
@@ -129,18 +129,30 @@ void parent(struct node* nodes)
             max_fd = nodes[i].pipefd_wr[1];
     } 
 
+    int remain_fds = 0;
     while(1)
     {
+        remain_fds = 0;
         FD_ZERO(&readfds);
         FD_ZERO(&writefds);
-        tv.tv_sec = 1;
+        tv.tv_sec = 2;
         tv.tv_usec = 0;
         for(i = 1; i < chld_qt; i++)
         {
-            if(nodes[i].read_finished != 1)
+            if(!nodes[i].read_finished)
+                remain_fds++;
+            if(!nodes[i].write_finished)
+                remain_fds++;
+            if((!nodes[i].read_avail) && (!nodes[i].read_finished))
                 FD_SET(nodes[i].pipefd_rd[0], &readfds);
-            if(nodes[i].write_finished != 1)
+            if((!nodes[i].write_avail) && (!nodes[i].write_finished))
                 FD_SET(nodes[i].pipefd_wr[1], &writefds);
+        }
+        if(remain_fds == 0)
+        {
+            for(i = 1; i < chld_qt; i++)
+                free(nodes[i].buf);
+            exit(EXIT_SUCCESS);
         }
         useReadyFds(nodes);
     }
@@ -156,7 +168,12 @@ void useReadyFds(struct node* nodes)
     {
         for(i = 1; i < chld_qt; i++)
         {
-            if(FD_ISSET(nodes[i].pipefd_rd[0], &readfds) && (nodes[i].remain_bytes == 0) && (nodes[i].new_data == 0))
+            nodes[i].read_avail = nodes[i].write_avail = 0;
+            if(FD_ISSET(nodes[i].pipefd_rd[0], &readfds))
+                nodes[i].read_avail = 1;
+            if(FD_ISSET(nodes[i].pipefd_wr[1], &writefds))
+                nodes[i].write_avail = 1;
+            if(FD_ISSET(nodes[i].pipefd_rd[0], &readfds) && (nodes[i].new_data == 0))
             {
                 nodes[i].read_bytes = read(nodes[i].pipefd_rd[0], nodes[i].buf, nodes[i].buf_size);
                 if(nodes[i].read_bytes == 0)
@@ -177,13 +194,6 @@ void useReadyFds(struct node* nodes)
                     close(nodes[i].pipefd_wr[1]);
                 }
         }
-    }
-    
-    if(ready_qt == 0)
-    {
-        for(i = 1; i < chld_qt; i++)
-            free(nodes[i].buf);
-        exit(EXIT_SUCCESS);
     }
 }
 
