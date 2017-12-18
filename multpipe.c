@@ -26,7 +26,6 @@ int chld_qt = 0;
 int file_fd = -1;
 int max_fd   = 0;
 fd_set readfds, writefds;
-struct timeval tv;
 
 struct node
 {
@@ -40,7 +39,7 @@ struct node
     int     write_finished;
     int     read_avail;
     int     write_avail;
-    int     new_data;
+    int     data_in_buf;
     int     pipefd_rd[2];
     int     pipefd_wr[2];
 };
@@ -111,7 +110,7 @@ void parent(struct node* nodes)
         nodes[i].write_finished = 0;
         nodes[i].read_avail     = 0;
         nodes[i].write_avail    = 0;
-        nodes[i].new_data       = 0;
+        nodes[i].data_in_buf       = 0;
         close(nodes[i].pipefd_rd[1]);
         close(nodes[i].pipefd_wr[0]);
         flags = fcntl(nodes[i].pipefd_wr[1], F_GETFL);
@@ -135,17 +134,20 @@ void parent(struct node* nodes)
         remain_fds = 0;
         FD_ZERO(&readfds);
         FD_ZERO(&writefds);
-        tv.tv_sec = 2;
-        tv.tv_usec = 0;
         for(i = 1; i < chld_qt; i++)
         {
             if(!nodes[i].read_finished)
                 remain_fds++;
+            if((!nodes[i].read_finished) && (nodes[i].data_in_buf == 0))
+                FD_SET(nodes[i].pipefd_rd[0], &readfds);
+            if((nodes[i].read_finished) && (nodes[i].data_in_buf == 0))
+            {
+                nodes[i].write_finished = 1;
+                close(nodes[i].pipefd_wr[1]);
+            }
             if(!nodes[i].write_finished)
                 remain_fds++;
-            if((!nodes[i].read_avail) && (!nodes[i].read_finished))
-                FD_SET(nodes[i].pipefd_rd[0], &readfds);
-            if((!nodes[i].write_avail) && (!nodes[i].write_finished))
+            if((!nodes[i].write_finished) && (nodes[i].data_in_buf))
                 FD_SET(nodes[i].pipefd_wr[1], &writefds);
         }
         if(remain_fds == 0)
@@ -162,37 +164,26 @@ void useReadyFds(struct node* nodes)
 {   
     int i = 0;
     int ready_qt = -1;
-    ready_qt = select(max_fd + 1, &readfds, &writefds, NULL, &tv);
+    ready_qt = select(max_fd + 1, &readfds, &writefds, NULL, NULL);
     CHECK_RET_VAL(select, ready_qt)
     if(ready_qt > 0)
     {
         for(i = 1; i < chld_qt; i++)
         {
-            nodes[i].read_avail = nodes[i].write_avail = 0;
             if(FD_ISSET(nodes[i].pipefd_rd[0], &readfds))
-                nodes[i].read_avail = 1;
-            if(FD_ISSET(nodes[i].pipefd_wr[1], &writefds))
-                nodes[i].write_avail = 1;
-            if(FD_ISSET(nodes[i].pipefd_rd[0], &readfds) && (nodes[i].new_data == 0))
             {
                 nodes[i].read_bytes = read(nodes[i].pipefd_rd[0], nodes[i].buf, nodes[i].buf_size);
                 if(nodes[i].read_bytes == 0)
                 {
                     nodes[i].read_finished = 1;
                     close(nodes[i].pipefd_rd[0]);
-                    nodes[i].new_data = 0;
+                    nodes[i].data_in_buf = 0;
                 }
                 else
-                    nodes[i].new_data = 1;
+                    nodes[i].data_in_buf = 1;
             }
-            if(FD_ISSET(nodes[i].pipefd_wr[1], &writefds) && (nodes[i].new_data || nodes[i].remain_bytes))
+            if(FD_ISSET(nodes[i].pipefd_wr[1], &writefds))
                 writeNode(nodes, i);
-            else 
-                if(FD_ISSET(nodes[i].pipefd_wr[1], &writefds) && nodes[i].read_finished)
-                {
-                    nodes[i].write_finished = 1;
-                    close(nodes[i].pipefd_wr[1]);
-                }
         }
     }
 }
@@ -206,7 +197,7 @@ void writeNode(struct node* nodes, int i)
         nodes[i].remain_bytes   = nodes[i].read_bytes - nodes[i].written_bytes;
         nodes[i].buf_write_from = nodes[i].buf + nodes[i].written_bytes;
         if(nodes[i].remain_bytes == 0)
-            nodes[i].new_data = 0;
+            nodes[i].data_in_buf = 0;
     }
     else
     {
@@ -215,7 +206,7 @@ void writeNode(struct node* nodes, int i)
         nodes[i].remain_bytes = nodes[i].remain_bytes - nodes[i].written_bytes;
         nodes[i].buf_write_from = nodes[i].buf_write_from + nodes[i].written_bytes;
         if(nodes[i].remain_bytes == 0)
-            nodes[i].new_data = 0;
+            nodes[i].data_in_buf = 0;
     }
 }
 
@@ -236,8 +227,8 @@ void child(int chld_num, int fd_rd, int fd_wr, struct node* nodes)
     ssize_t read_bytes = read(fd_rd, buf, CHLD_BUF_SIZE);
     while(read_bytes > 0)
     {
-        if (chld_num == 2)
-            sleep(1);
+       // if (chld_num == 2)
+         //   sleep(1);
         write(fd_wr, buf, read_bytes);
         read_bytes = read(fd_rd, buf, CHLD_BUF_SIZE);
     }
